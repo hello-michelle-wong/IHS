@@ -1,0 +1,424 @@
+---
+title: "Machine Learning Demo"
+output: html_document
+date: "2024-09-25"
+---
+---
+title: "Malawi"
+output: html_notebook
+---
+
+------LOADING DATA AND LIBRARIES--------- 
+I believe only haven is needed for the ML model, the rest are for the MMR rates, but no harm loading  
+```{r}
+library(randomForest)
+library(demography)
+library(haven)
+#library(xlsx)
+library(DHS.rates)
+library(here)
+
+#Malawi 2015-2016 dataset from DHS 
+#test_Malawi<- read_sav("/Users/selenachan/Downloads/MDIR71SV/MDIR71FL.SAV")
+IRdata<- read_sav("/Users/michellewong/Downloads/MW_2015-16_DHS_09132024_1441_204260/MWIR7ASV/MWIR7AFL.SAV")
+```
+
+---------CLEANING-------------
+```{r}
+#Creating a weight column 
+IRdata$weight <- IRdata$V005 / 1000000
+
+# Get column names
+column_names <- names(IRdata)
+
+# Iterate through all column names and replace '$' with '_'
+for (col_name in column_names) {
+  new_col_name <- gsub("\\$", "_", col_name)
+  names(IRdata)[which(names(IRdata) == col_name)] <- new_col_name
+}
+
+# Convert all column names to lowercase
+names(IRdata) <- tolower(names(IRdata))
+```
+
+I don't like to mess with OG data so we are copying it to testing_IR to work with 
+```{r}
+testing_IR<-IRdata
+```
+
+normally, mm16 = sibling's death due to violence or accident 
+mm1 = female or male 
+mm3 = sibling's current age 
+mm7 = sibling's age at death 
+mm8 = date of death of sibling 
+mm14 = number of sibling's children 
+v730 = husband/partner's age, 98 = don't know. 96 = 96+ 
+
+```{r}
+# Find columns starting with "mm16" containing the value 0
+mm16_cols <- grep("^mm16_", names(testing_IR))
+count_zero <- sum(apply(testing_IR[, mm16_cols], 2, function(col) sum(col == 0, na.rm = TRUE)))
+print(count_zero)
+```
+
+```{r}
+mm9_cols <- grep("^mm9_", names(testing_IR))
+rows_with_235 <- which(apply(testing_IR[, mm9_cols], 1, function(row) any(row %in% c(2, 3, 5), na.rm = TRUE)))
+
+result_df <- testing_IR[rows_with_235, ]
+print(result_df)
+```
+
+```{r}
+# Find rows where columns starting with "mm16" contain the value 0
+mm16_cols <- grep("^mm16_", names(testing_IR))
+rows_with_zero <- which(apply(testing_IR[, mm16_cols], 1, function(row) any(row == 0, na.rm = TRUE)))
+
+# Find rows where columns starting with "mm9" contain the values 2, 3, or 5
+mm9_cols <- grep("^mm9_", names(testing_IR))
+rows_with_235 <- which(apply(testing_IR[, mm9_cols], 1, function(row) any(row %in% c(2, 3, 5), na.rm = TRUE)))
+
+# Find rows that satisfy both conditions
+rows_with_both <- intersect(rows_with_zero, rows_with_235)
+
+# Create a new dataframe containing the rows that satisfy both conditions
+result_df <- testing_IR[rows_with_both, ]
+print(result_df)
+```
+
+```{r}
+# Add a new column "Died_by_MM" to testing_IR
+testing_IR$Died_by_MM <- 0
+
+# Find rows where mm9=2,3,5 AND mm16=0
+rows_with_both <- intersect(rows_with_zero, rows_with_235)
+
+# Update the values in the "Died_by_MM" column
+testing_IR$Died_by_MM[rows_with_both] <- 1
+```
+
+Total count of MM deaths with mm9=2,3,5 AND mm16=0
+```{r}
+num_ones <- sum(testing_IR$Died_by_MM == 1)
+print(num_ones)
+```
+
+```{r}
+cleaned_data_4 <- testing_IR
+cleaned_data_4[is.na(cleaned_data_4)] <- 0
+
+# Exclude columns starting with "mm9" and "mm16", and also exclude "caseid"
+cleaned_data_4 <- cleaned_data_4[, !grepl("^mm|^caseid$", names(cleaned_data_4))]
+
+X <- cleaned_data_4[, -which(names(cleaned_data_4) == "Died_by_MM")] # Extract predictor variables
+y <- cleaned_data_4$Died_by_MM
+```
+
+```{r}
+set.seed(123)
+
+# Split the data into training, validation, and testing sets
+train_indices <- sample(nrow(cleaned_data_4), 0.6 * nrow(cleaned_data_4))  # 60% for training
+validation_and_test_indices <- setdiff(1:nrow(cleaned_data_4), train_indices)
+validation_indices <- sample(validation_and_test_indices, 0.2 * nrow(cleaned_data_4))  # 20% for validation
+test_indices <- setdiff(validation_and_test_indices, validation_indices)  # Remaining 20% for testing
+
+train_data <- cleaned_data_4[train_indices, ]  # Training data
+validation_data <- cleaned_data_4[validation_indices, ]  # Validation data
+test_data <- cleaned_data_4[test_indices, ]  # Testing data
+
+# Extract predictor variables (X) and target variable (y) directly from cleaned_data
+X_train <- train_data[, setdiff(names(train_data), c("Died_by_MM", "V005", "weight"))]
+y_train <- train_data$Died_by_MM
+X_validation <- validation_data[, setdiff(names(validation_data), c("Died_by_MM", "V005", "weight"))]
+y_validation <- validation_data$Died_by_MM
+X_test <- test_data[, setdiff(names(test_data), c("Died_by_MM", "V005", "weight"))]
+y_test <- test_data$Died_by_MM
+y_train <- factor(y_train)
+
+# Train a Random Forest model using the training set
+rf_model <- randomForest(x = X_train, y = y_train, type = "classification", weights = train_data$weight)
+predictions_validation <- predict(rf_model, X_validation) # Make predictions on the validation set
+
+accuracy_validation <- mean(predictions_validation == y_validation) # Assess performance of model on validation set
+print(paste("Accuracy on Validation Set:", accuracy_validation))
+
+# Make predictions on the testing set
+predictions_test <- predict(rf_model, X_test)
+
+# Assess the performance of the model on testing set
+accuracy_test <- mean(predictions_test == y_test)
+print(paste("Accuracy on Testing Set:", accuracy_test))
+
+importance_scores_4 <- importance(rf_model) # Extract feature importance scores
+sorted_scores_4 <- importance_scores_4[order(importance_scores_4, decreasing = TRUE), ]
+
+top_n_4 <- 100 
+print(head(sorted_scores_4, n = top_n_4))
+```
+
+Then put the above list into a string seperated by commas and in quotes and set it to variable X. Below is an example, not sure what the actual list will be. Just ask chatGPT to do it. 
+
+The visualization of Random Forest algorithm starts here, if it is acting buggy/has so many variables the graphs look funny, I can run this section! This is just a visualization of the approximate algorithm.
+```{r}
+library(caret)
+library(mice)
+library(randomForest)
+library(dplyr)
+
+final_model_variables <- c("v002", "v001", "v525", "v004", "v191", "v021", "v005", "v008a", "b11_01", "vcal_1", "v509", "v212", "b19_02", "v508", "v040", "b18_01", "b19_01", "v016", "v011", "b3_01", "v222", "v801", "b12_02", "b18_02", "v511", "v211", "v802", "v152", "v512", "b17_02", "sdist", "v527", "v805", "v834a", "v531", "v852a", "v028", "b3_02", "v115", "v507", "v022", "v023", "v012", "b17_01", "v803", "b12_03", "v444a", "v010", "v215", "v704", "v440", "v221", "b1_02", "v614", "v191a", "b19_03", "v030", "b8_02", "v613", "v445", "b8_01", "b11_02", "v730", "b1_01", "b3_03", "b11_03", "b18_03", "v107", "b18_04", "v442", "b1_03", "v446", "b12_04", "v136", "v444", "v009", "b17_04", "b19_04", "b17_03", "v443", "v130", "m7_1", "b2_03", "v437", "v829", "v128", "b16_02", "v628", "b12_05", "v836", "v104", "v131", "b2_01", "v478", "v705", "v133", "v202", "b3_04", "b18_05", "v715")
+IRdata <- cleaned_data_4
+IRdata[is.na(IRdata)] <- 0
+
+# List of variables included in the final model
+final_model_variables <- c("v802", "v801")
+
+# Subset the dataset with the final model variables
+IRdata_final <- IRdata[, final_model_variables]
+
+# Convert classes variable to factor
+IRdata_final$classes <- as.factor(IRdata$Died_by_MM)
+summary(IRdata_final$classes)
+
+set.seed(42)
+index <- createDataPartition(IRdata_final$classes, p = 0.7, list = FALSE)
+train_data <- IRdata_final[index, ]
+test_data  <- IRdata_final[-index, ]
+
+# Get the unique values
+final_model_variables <- unique(final_model_variables)
+
+# Subset the dataset with the final model variables
+IRdata_final <- IRdata[, final_model_variables]
+
+# Convert classes variable to factor
+IRdata_final$classes <- as.factor(IRdata$Died_by_MM)
+
+# Separate into training and test data
+set.seed(42)
+index <- sample(nrow(IRdata_final), 0.7 * nrow(IRdata_final))  # 70% for training
+train_data <- IRdata_final[index, ]
+test_data <- IRdata_final[-index, ]
+
+# Run model
+set.seed(42)
+model_rf <- caret::train(classes ~ .,
+                         data = train_data,
+                         method = "rf",
+                         preProcess = c("scale", "center"),
+                         trControl = trainControl(method = "repeatedcv", 
+                                                  number = 10, 
+                                                  repeats = 10, 
+                                                  savePredictions = TRUE, 
+                                                  verboseIter = FALSE))
+```
+
+
+```{r}
+library(dplyr)
+library(ggraph)
+library(igraph)
+
+tree_func <- function(final_model, 
+                      tree_num) {
+  
+  # get tree by index
+  tree <- randomForest::getTree(final_model, 
+                                k = tree_num, 
+                                labelVar = TRUE) %>%
+    tibble::rownames_to_column() %>%
+    # make leaf split points to NA, so the 0s won't get plotted
+    mutate(`split point` = ifelse(is.na(prediction), `split point`, NA))
+  
+  # prepare data frame for graph
+  graph_frame <- data.frame(from = rep(tree$rowname, 2),
+                            to = c(tree$`left daughter`, tree$`right daughter`))
+  
+  # convert to graph and delete the last node that we don't want to plot
+  graph <- graph_from_data_frame(graph_frame) %>%
+    delete_vertices("0")
+  
+  # set node labels
+  V(graph)$node_label <- gsub("_", " ", as.character(tree$`split var`))
+  V(graph)$leaf_label <- as.character(tree$prediction)
+  V(graph)$split <- as.character(round(tree$`split point`, digits = 2))
+  
+  # plot
+  plot <- ggraph(graph, 'dendrogram') + 
+    theme_bw() +
+    geom_edge_link() +
+    geom_node_point() +
+    geom_node_text(aes(label = node_label), na.rm = TRUE, repel = TRUE) +
+    geom_node_label(aes(label = split), vjust = 2.5, na.rm = TRUE, fill = "white") +
+    geom_node_label(aes(label = leaf_label, fill = leaf_label), na.rm = TRUE, 
+					repel = TRUE, colour = "white", fontface = "bold", show.legend = FALSE) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_rect(fill = "white"),
+          panel.border = element_blank(),
+          axis.line = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          plot.title = element_text(size = 18))
+  
+  print(plot)
+}
+```
+
+```{r}
+tree_num <- which(model_rf$finalModel$forest$ndbigtree == min(model_rf$finalModel$forest$ndbigtree))
+tree_num <- tree_num[1]
+tree_func(final_model = model_rf$finalModel, tree_num)
+```
+
+Getting the p values 
+```{r}
+#replace with list of actual variables
+X <- c("v002", "v001", "v525", "v004", "v191", "v021", "v005", "v008a", "b11_01", "vcal_1", "v509", "v212", "b19_02", "v508", "v040", "b18_01", "b19_01", "v016", "v011", "b3_01", "v222", "v801", "b12_02", "b18_02", "v511", "v211", "v802", "v152", "v512", "b17_02", "sdist", "v527", "v805", "v834a", "v531", "v852a", "v028", "b3_02", "v115", "v507", "v022", "v023", "v012", "b17_01", "v803", "b12_03", "v444a", "v010", "v215", "v704", "v440", "v221", "b1_02", "v614", "v191a", "b19_03", "v030", "b8_02", "v613", "v445", "b8_01", "b11_02", "v730", "b1_01", "b3_03", "b11_03", "b18_03", "v107", "b18_04", "v442", "b1_03", "v446", "b12_04", "v136", "v444", "v009", "b17_04", "b19_04", "b17_03", "v443", "v130", "m7_1", "b2_03", "v437", "v829", "v128", "b16_02", "v628", "b12_05", "v836", "v104", "v131", "b2_01", "v478", "v705", "v133", "v202", "b3_04", "b18_05", "v715")
+
+# Initialize an empty dataframe to store the results
+results_df <- data.frame(variable = character(), p_value_logit = numeric(), p_value_wilcox = numeric(), stringsAsFactors = FALSE)
+
+for (variable in X) {
+  print(variable) 
+  testing_IR[[variable]] <- as.numeric(as.character(testing_IR[[variable]]))
+  
+  if(all(!is.na(testing_IR[[variable]]) & !is.nan(testing_IR[[variable]]) & !is.infinite(testing_IR[[variable]]))) {
+    # Perform logistic regression
+    model <- glm(Died_by_MM ~ ., data = testing_IR[c(variable, "weight", "Died_by_MM")], family = binomial)
+    p_value_logit <- summary(model)$coefficients[2, 4]
+    
+    # Replace NA, NaN, and Inf with 0 in the variable column
+    testing_IR[[variable]][is.na(testing_IR[[variable]]) | is.nan(testing_IR[[variable]]) | is.infinite(testing_IR[[variable]])] <- 0
+    
+    wilcox_result <- wilcox.test(testing_IR[[variable]] ~ testing_IR$Died_by_MM, data = testing_IR, weight = testing_IR$weight)  
+    p_value_wilcox <- wilcox_result$p.value
+    
+    results_df <- rbind(results_df, data.frame(variable = variable, p_value_logit = p_value_logit, p_value_wilcox = p_value_wilcox))
+  }
+}
+print(results_df)
+```
+
+```{r}
+# Remove rows where p_value_wilcox is 0
+results_df_filtered <- results_df[results_df$p_value_wilcox != 0, ]
+sorted_results_df <- results_df_filtered[order(results_df_filtered$p_value_wilcox), ]
+print(sorted_results_df)
+```
+
+AIC step to prevent overfitting of the model 
+```{r}
+library(MASS)  
+
+# Remove missing values from the dataset
+testing_IR[is.na(testing_IR)] <- 0
+print(sum(is.na(testing_IR))) # Should print 0 if there are no NA values
+
+#replace with Malawi specific list from random forest 
+X <- c("v002", "v001", "v525", "v004", "v191", "v021", "v005", "v008a", "b11_01", "vcal_1", "v509", "v212", "b19_02", "v508", "v040", "b18_01", "b19_01", "v016", "v011", "b3_01", "v222", "v801", "b12_02", "b18_02", "v511", "v211", "v802", "v152", "v512", "b17_02", "sdist", "v527", "v805", "v834a", "v531", "v852a", "v028", "b3_02", "v115", "v507", "v022", "v023", "v012", "b17_01", "v803", "b12_03", "v444a", "v010", "v215", "v704", "v440", "v221", "b1_02", "v614", "v191a", "b19_03", "v030", "b8_02", "v613", "v445", "b8_01", "b11_02", "v730", "b1_01", "b3_03", "b11_03", "b18_03", "v107", "b18_04", "v442", "b1_03", "v446", "b12_04", "v136", "v444", "v009", "b17_04", "b19_04", "b17_03", "v443", "v130", "m7_1", "b2_03", "v437", "v829", "v128", "b16_02", "v628", "b12_05", "v836", "v104", "v131", "b2_01", "v478", "v705", "v133", "v202", "b3_04", "b18_05", "v715")
+
+# you will likely get lots of warning messages, just ignore it 
+response <- "Died_by_MM"
+formula_initial <- as.formula(paste(response, "~", paste(X, collapse = "+")))
+initial_model <- glm(formula_initial, data = testing_IR, family = binomial)
+final_model <- stepAIC(initial_model, direction = "both", trace = FALSE)
+summary(final_model)
+```
+
+ROC curve  
+```{r}
+library(pROC)
+library(caret)
+
+# insert top variables here 
+variables <- c("v002", "v001", "v525", "v004", "v191", "v021", "v005", "v008a", "b11_01", "vcal_1", "v509", "v212", "b19_02", "v508", "v040", "b18_01", "b19_01", "v016", "v011", "b3_01", "v222", "v801", "b12_02", "b18_02", "v511", "v211", "v802", "v152", "v512", "b17_02", "sdist", "v527", "v805", "v834a", "v531", "v852a", "v028", "b3_02", "v115", "v507", "v022", "v023", "v012", "b17_01", "v803", "b12_03", "v444a", "v010", "v215", "v704", "v440", "v221", "b1_02", "v614", "v191a", "b19_03", "v030", "b8_02", "v613", "v445", "b8_01", "b11_02", "v730", "b1_01", "b3_03", "b11_03", "b18_03", "v107", "b18_04", "v442", "b1_03", "v446", "b12_04", "v136", "v444", "v009", "b17_04", "b19_04", "b17_03", "v443", "v130", "m7_1", "b2_03", "v437", "v829", "v128", "b16_02", "v628", "b12_05", "v836", "v104", "v131", "b2_01", "v478", "v705", "v133", "v202", "b3_04", "b18_05", "v715")
+
+formula <- as.formula(paste("Died_by_MM ~", paste(variables, collapse = "+")))
+
+model <- glm(formula, data = testing_IR, family = binomial)
+predictions <- predict(model, newdata = testing_IR, type = "response")
+
+# Create the ROC curve
+roc_curve <- roc(testing_IR$Died_by_MM, predictions)
+plot(roc_curve, main = "ROC Curve", col = "blue")
+auc_value <- auc(roc_curve)
+print(paste("AUC:", auc_value))
+```
+
+Lovell is to determine the cofoounding, not via brain. so potentially no specification of cofounder (bio sig, Hills criteria) and 
+
+see if mm16 is a confounder, which, potentially overly cautious 
+use the non mm16 method to classify Died_by_MM and then see if mm16 is a confounder 
+
+```{r}
+library(dplyr)
+
+# Step 1: Fit the full model
+#full_model <- lm(Died_by_MM ~ v512 + b19_02 + v011 + v010 + s215c_02, data = testing_IR)
+
+# Step 2: Regress each confounding variable on the main independent variables and collect residuals
+#confounders <- c("s215c_02")
+#independent_vars <- c("v512", "b19_02", "v011", "v010")
+#residuals_matrix <- testing_IR
+
+#for (confounder in confounders) {
+ #   formula <- as.formula(paste(confounder, "~", paste(independent_vars, collapse = " + ")))
+ #   confounder_model <- lm(formula, data = testing_IR)
+ #   residuals_matrix[[confounder]] <- resid(confounder_model)
+}
+
+# Step 3: Regress the dependent variable on the main independent variables to get residuals
+#dependent_model <- lm(Died_by_MM ~ v512 + b19_02 + v011 + v010, data = testing_IR)
+#residuals_matrix[["Died_by_MM_residual"]] <- resid(dependent_model)
+
+# Step 4: Regress the dependent variable residuals on the residuals of the confounders
+#model_final <- lm(Died_by_MM_residual ~ v512 + b19_02 + v011 + v010 + s215c_02, data = residuals_matrix)
+
+# Step 5: View the summary of the final model
+#summary(model_final)
+```
+
+Print out the p values after the FWL theorem 
+```{r}
+library(dplyr)
+library(randomForest)
+
+# Assuming your dataset is named 'testing_IR' and dependent variable is 'Died_by_MM'
+# Step 1: Fit the full model
+#full_model <- lm(Died_by_MM ~ v512 + b19_02 + v011 + v010 + v730, data = testing_IR)
+
+# List of confounders (which includes main independent variables in this case)
+#confounders <- c("v512", "b19_02", "v011", "v010", "v730")
+
+# Initialize residuals matrix with the original dataset
+#residuals_matrix <- testing_IR
+
+# Step 2: Regress each confounding variable on the main independent variables and collect residuals
+#for (confounder in confounders) {
+    #other_confounders <- confounders[confounders != confounder]
+    #formula <- as.formula(paste(confounder, "~", paste(other_confounders, collapse = " + ")))
+    #confounder_model <- lm(formula, data = testing_IR)
+    #residuals_matrix[[confounder]] <- resid(confounder_model)
+#}
+
+# Step 3: Regress the dependent variable on the main independent variables to get residuals
+#dependent_model <- lm(Died_by_MM ~ v512 + b19_02 + v011 + v010 + v730, data = testing_IR)
+#residuals_matrix[["Died_by_MM_residual"]] <- resid(dependent_model)
+
+# Step 4: Create a new dataset for the final regression, using residuals only
+#final_residuals_data <- residuals_matrix %>% select(Died_by_MM_residual, all_of(confounders))
+
+# Step 5: Run Random Forest on the adjusted dataset
+#random_forest_model <- randomForest(Died_by_MM_residual ~ ., data = final_residuals_data, importance = TRUE)
+#print(random_forest_model)
+
+# Step 6: Check the importance of variables
+#importance(random_forest_model)
+#varImpPlot(random_forest_model)
+```
+
